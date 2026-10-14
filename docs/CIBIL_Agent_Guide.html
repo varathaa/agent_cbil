@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CIBIL Check Agent - Project Guide</title>
+<style>
+  body { font-family: "Segoe UI", Arial, sans-serif; font-size: 11pt; line-height: 1.5; margin: 0 10px; color: #222; }
+  h1 { color: #0b4f8a; border-bottom: 3px solid #0b4f8a; padding-bottom: 6px; }
+  h2 { color: #0b4f8a; border-bottom: 1px solid #ccc; padding-bottom: 4px; margin-top: 28px; page-break-after: avoid; }
+  h3 { color: #333; margin-top: 18px; page-break-after: avoid; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0; page-break-inside: avoid; }
+  th, td { border: 1px solid #bbb; padding: 6px 8px; text-align: left; vertical-align: top; }
+  th { background: #e8f0f8; }
+  code { font-family: Consolas, monospace; background: #f3f3f3; padding: 1px 4px; border-radius: 3px; font-size: 10pt; }
+  pre { background: #f6f8fa; border: 1px solid #ddd; padding: 10px; border-radius: 4px; font-size: 9.5pt; white-space: pre-wrap; page-break-inside: avoid; }
+  pre code { background: none; padding: 0; }
+  .flow { background: #f6f8fa; border-left: 4px solid #0b4f8a; padding: 8px 14px; page-break-inside: avoid; }
+  .note { background: #fff8e1; border-left: 4px solid #f0ad00; padding: 8px 12px; }
+  .mermaid { text-align: center; page-break-inside: avoid; margin: 12px 0; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: true, theme: "default" });</script>
+</head>
+<body>
+
+<h1>CIBIL Check Agent &ndash; Project Guide</h1>
+<p>Location: <code>UdemyTask/cibil_agent/</code> &nbsp;|&nbsp; Stack: Streamlit, LangChain, Ollama (gemma4), Oracle (python-oracledb)</p>
+
+<p>The project had no logging, so logging was added. Logs now go to the terminal and to <code>logs/cibil_agent.log</code>. A <code>Dockerfile</code> and <code>.dockerignore</code> were also added for packaging. The app has not yet been run end to end with Oracle and Ollama together.</p>
+
+<p class="note">VS Code may still mark the <code>langchain</code> and <code>oracledb</code> imports as unresolved. The code runs fine; the editor just hasn't picked up the <code>.venv</code> change. Run <b>Developer: Reload Window</b> to clear it.</p>
+
+<h2>1. Checking the logs</h2>
+<table>
+  <tr><th>Where</th><th>How</th></tr>
+  <tr><td>Terminal running <code>streamlit run app.py</code></td><td>Log lines appear live</td></tr>
+  <tr><td><code>UdemyTask/cibil_agent/logs/cibil_agent.log</code></td><td>Keeps up to 5 old files of 5 MB each</td></tr>
+  <tr><td>Follow the file live</td><td><code>Get-Content logs\cibil_agent.log -Wait -Tail 50</code></td></tr>
+  <tr><td>More detail</td><td>Set <code>LOG_LEVEL=DEBUG</code> in <code>.env</code></td></tr>
+  <tr><td>Ollama's own logs</td><td><code>%LOCALAPPDATA%\Ollama\server.log</code></td></tr>
+</table>
+<p>What gets logged:</p>
+<ul>
+  <li><b>Agent:</b> each prompt received (length only, not the text), the model used, total time, and whether a record was found. It also logs when the fallback is used and full errors when the agent fails.</li>
+  <li><b>Tools:</b> which tool the model called, the last 4 characters of the customer ID or mobile, and any input that was rejected.</li>
+  <li><b>Database:</b> pool creation, each query's condition, whether a row was found, how long it took, and connection failures.</li>
+</ul>
+<p>Full mobile numbers, the password and CIBIL details are never logged.</p>
+
+<h2>2. How it works</h2>
+<pre class="mermaid">
+sequenceDiagram
+    participant U as User (Browser)
+    participant S as app.py (Streamlit)
+    participant A as agent.py (LangChain agent)
+    participant L as Ollama gemma4
+    participant T as tools.py
+    participant D as db.py
+    participant O as Oracle DB
+    U->>S: "Check CIBIL for mobile 9876543210"
+    S->>A: run_agent(prompt)
+    A->>L: system prompt + user prompt + tool definitions
+    L-->>A: tool call: get_cibil_by_mobile("9876543210")
+    A->>T: execute tool
+    T->>D: fetch_by_mobile()
+    D->>D: check format
+    D->>O: SELECT ... WHERE MOBILE_NUMBER = :mobile
+    O-->>D: customer + latest CIBIL row
+    D-->>T: dict
+    T-->>A: formatted text (the retrieved context)
+    A->>L: tool result
+    L-->>A: final analysis (score band, risk, etc.)
+    A-->>S: (answer, record)
+    S-->>U: markdown answer + database record
+</pre>
+<div class="flow">
+<ol>
+  <li><b>User (browser)</b> types: <i>"Check CIBIL for mobile 9876543210"</i> into the Streamlit chat.</li>
+  <li><b>app.py</b> calls <code>run_agent(prompt)</code>.</li>
+  <li><b>agent.py</b> sends the system prompt, user prompt and tool definitions to <b>Ollama gemma4</b>.</li>
+  <li><b>gemma4</b> replies with a tool call: <code>get_cibil_by_mobile("9876543210")</code>.</li>
+  <li><b>tools.py</b> runs the tool, which calls <code>db.fetch_by_mobile()</code>.</li>
+  <li><b>db.py</b> checks the format, then runs <code>SELECT ... WHERE MOBILE_NUMBER = :mobile</code> on <b>Oracle</b>.</li>
+  <li>Oracle returns the customer plus their latest CIBIL row. db.py returns it as a dict, and tools.py turns it into text (the retrieved context).</li>
+  <li>The agent sends the tool result back to gemma4, which writes the final analysis (score band, risk, etc.).</li>
+  <li><b>app.py</b> shows the markdown answer and the database record to the user.</li>
+</ol>
+</div>
+
+<h3>What each file does</h3>
+<table>
+  <tr><th>File</th><th>Role</th></tr>
+  <tr><td><code>config.py</code></td><td>Loads <code>.env</code> and sets up logging.</td></tr>
+  <tr><td><code>db.py</code></td><td>Oracle connection pool and lookups.</td></tr>
+  <tr><td><code>tools.py</code></td><td>The two lookup tools the model can call.</td></tr>
+  <tr><td><code>agent.py</code></td><td>The LangChain agent: model, tools and system prompt.</td></tr>
+  <tr><td><code>app.py</code></td><td>Streamlit chat page and sidebar.</td></tr>
+</table>
+<ul>
+  <li><b><code>db.py</code>:</b>
+    <ul>
+      <li>Joins <code>VAG_CUSTOMER_MASTER</code> to the customer's latest <code>VAG_CIBIL_REPORTS</code> row.</li>
+      <li>Uses bind variables, so input can't be injected into the SQL.</li>
+      <li>Checks the customer ID and mobile format before querying.</li>
+      <li>Cuts the bureau summary text to 2,000 characters.</li>
+    </ul>
+  </li>
+  <li><b><code>tools.py</code>:</b>
+    <ul>
+      <li>The docstrings on the two tools tell the model when to use each one.</li>
+      <li>The last record found is kept so the UI can show it.</li>
+    </ul>
+  </li>
+  <li><b><code>agent.py</code>:</b>
+    <ul>
+      <li>The model chooses which tool to call.</li>
+      <li>If <code>gemma4</code> turns out not to support tool calling, the code pulls the ID or mobile out of the prompt itself, queries Oracle, and asks the model only to write the summary.</li>
+    </ul>
+  </li>
+  <li><b><code>app.py</code>:</b> chat history, a spinner while it works, the database record under each answer, and sidebar buttons to test the database and clear the chat.</li>
+</ul>
+<p>The "retrieval" part is fetching live rows from Oracle at question time and giving them to the model as context. There is no vector database; that isn't needed for exact ID or mobile lookups. The system prompt tells the model to answer only from that data.</p>
+
+<h2>3. Running locally</h2>
+<pre><code>cd C:\varathaa\AI_WS\PY_WS\UdemyTask\cibil_agent
+..\..\.venv\Scripts\Activate.ps1
+
+# 1. Ollama is running and the model is present
+ollama list
+
+# 2. Database connection and a sample lookup
+python db.py C1001
+python db.py 9876543210
+
+# 3. Start the UI (opens http://localhost:8501)
+streamlit run app.py</code></pre>
+<p>Try these in the chat:</p>
+<ul>
+  <li><code>Check CIBIL for customer C1001</code></li>
+  <li><code>CIBIL for 9876543210</code></li>
+  <li><code>hello</code>: it should ask for an ID or mobile.</li>
+  <li><code>C1' OR '1'='1</code>: it should be rejected.</li>
+</ul>
+<p>To let others on your network use it, run <code>streamlit run app.py --server.address 0.0.0.0</code> and share <code>http://&lt;your-ip&gt;:8501</code>.</p>
+
+<h2>4. Packaging and deploying as a web app</h2>
+<p>Deploying online needs three things:</p>
+<ol>
+  <li><b>Oracle must be reachable from the server.</b> <code>orabetst*-scan.sg.gbs.pro</code> is an internal host, so public clouds (Streamlit Cloud, Render, a public Azure or AWS app) can't reach it. In practice this means deploying on your company's internal servers or cloud network.</li>
+  <li><b>Ollama must be reachable from the server.</b> Either run Ollama on that server or a GPU VM and set <code>OLLAMA_BASE_URL</code>, or use a cloud model such as <code>gpt-oss:120b-cloud</code>.</li>
+  <li><b>Secrets go in as environment variables</b>, never inside the image.</li>
+</ol>
+
+<h3>Option A: Docker (recommended)</h3>
+<pre><code>cd UdemyTask\cibil_agent
+docker build -t cibil-agent:1.0 .
+
+# Run, passing secrets from .env and pointing at the host's Ollama
+docker run -d --name cibil-agent -p 8501:8501 `
+  --env-file .env `
+  -e OLLAMA_BASE_URL=http://host.docker.internal:11434 `
+  -v ${PWD}\logs:/app/logs `
+  cibil-agent:1.0
+
+docker logs -f cibil-agent   # live logs</code></pre>
+<p>To put it on a server:</p>
+<ul>
+  <li>Push the image to your registry (<code>docker tag</code> then <code>docker push</code>).</li>
+  <li>Run it on an internal server, Kubernetes, or a cloud service like Azure Container Apps or AWS ECS inside your company network.</li>
+  <li>Keep the secrets in the platform's secret store rather than a <code>.env</code> file.</li>
+</ul>
+
+<h3>Option B: Linux VM without Docker</h3>
+<pre><code>python3 -m venv venv &amp;&amp; source venv/bin/activate
+pip install -r requirements.txt
+# create .env on the server (chmod 600 .env)
+nohup streamlit run app.py --server.port 8501 --server.address 0.0.0.0 --server.headless true &amp;</code></pre>
+<p>For anything long-lived, run it as a <code>systemd</code> service rather than with <code>nohup</code>.</p>
+
+<h3>Before exposing it to users</h3>
+<ul>
+  <li><b>Put Nginx or IIS in front</b> with HTTPS and WebSocket upgrade enabled (<code>proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade";</code>). Streamlit needs WebSockets to work.</li>
+  <li><b>Add authentication.</b> This app shows credit data, so use SSO or the reverse proxy's login, or Streamlit's built-in <code>st.login</code> with OIDC.</li>
+  <li><b>Use a read-only Oracle account</b> with <code>SELECT</code> on only these two tables.</li>
+  <li><b>Change the password</b> that was pasted into the chat, and keep <code>.env</code> out of git and out of images (both ignore files already exclude it).</li>
+  <li><b>Expect slow answers on CPU.</b> <code>gemma4</code> is a 9.6 GB model; a GPU host helps, and you may want to raise <code>max</code> in the connection pool for more users.</li>
+</ul>
+
+</body>
+</html>
